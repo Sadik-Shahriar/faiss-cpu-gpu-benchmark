@@ -1,0 +1,178 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{float}
+\usepackage{stfloats}
+
+\begin{document}
+
+\title{Exploring FAISS Indexing for Large-Scale Vector Search: A Comparative Benchmark Study on the SIFT1M Dataset}
+
+\author{
+\IEEEauthorblockN{Md.\ Sadik Shahriar\\
+ID: 2023-2-60-10}
+\IEEEauthorblockA{\textit{Department of Computer Science and Engineering} \\
+\textit{East West University}\\
+Dhaka, Bangladesh \\
+}
+}
+
+\maketitle
+
+\begin{abstract}
+Efficient similarity search over high-dimensional vector datasets is a fundamental requirement for modern AI systems, including retrieval-augmented generation, recommendation engines, and multimodal search. This paper presents a systematic benchmarking study of four FAISS indexing strategies---\texttt{IndexFlatL2}, \texttt{IndexIVFFlat}, \texttt{IndexIVFPQ}, and \texttt{IndexHNSWFlat}---evaluated on the SIFT1M dataset comprising 1,000,000 128-dimensional SIFT descriptors. Each index is benchmarked on both CPU and an NVIDIA T4 GPU to quantify the impact of hardware acceleration on query latency, index build time, memory consumption, and retrieval accuracy (Recall@10). To ensure accurate recall measurements, ground-truth nearest neighbors are computed independently for each dataset subset. All queries retrieve the top $K\!=\!10$ neighbors, and Recall@10 is defined as:
+\begin{equation}
+\text{Recall@}K = \frac{1}{|Q|}\sum_{q\in Q}\frac{|\mathcal{R}_K(q)\cap\mathcal{R}_K^{*}(q)|}{K}
+\end{equation}
+where $\mathcal{R}_K(q)$ denotes the retrieved set and $\mathcal{R}_K^{*}(q)$ the ground-truth set for query~$q$. Our results show that GPU acceleration reduces \texttt{FlatL2} query latency by approximately $80\times$ while preserving perfect recall. Among approximate methods, GPU-accelerated \texttt{IVFFlat} achieves the best accuracy--latency trade-off with 0.928 recall at 0.037~ms per query. We additionally analyze hyperparameter sensitivity (\texttt{nprobe}) and scalability across three dataset sizes (100K, 500K, 1M vectors).
+\end{abstract}
+
+\begin{IEEEkeywords}
+Vector Search, FAISS, Approximate Nearest Neighbor, GPU Acceleration, Product Quantization, HNSW, Inverted File Index
+\end{IEEEkeywords}
+
+\section{Introduction}
+Retrieving similar items from large collections of high-dimensional vectors is a core operation in many AI applications, including large language model pipelines~\cite{lewis2020rag}, image retrieval systems~\cite{babenko2014}, and recommendation engines. The naive approach of computing exact Euclidean distances between a query vector and every database vector has $O(N)$ time complexity, which becomes impractical as dataset sizes grow to millions or billions of vectors.
+
+Approximate Nearest Neighbor (ANN) search algorithms address this challenge by trading a small amount of retrieval accuracy for substantial improvements in query speed and memory efficiency. Facebook AI Similarity Search (FAISS)~\cite{faiss2024} is a widely adopted library that implements several ANN indexing strategies, each with distinct performance characteristics.
+
+This paper benchmarks four FAISS indexes on the standard SIFT1M dataset across three scales (100K, 500K, and 1M vectors). A primary contribution of this study is the explicit comparison of CPU and GPU execution for each index type, quantifying the performance gains achievable through hardware acceleration.
+
+\section{Indexing Methods}
+
+\begin{figure*}[t!]
+  \centering
+  \includegraphics[width=\textwidth]{cpu_gpu_comparison.png}
+  \caption{Four-panel benchmark comparison at the 1M-vector scale. (a)~Efficiency frontier: Recall@10 vs.\ query latency (CPU circles, GPU diamonds). (b)~Index build time vs.\ dataset size. (c)~Query latency comparison between CPU and GPU for each index. (d)~Memory footprint per index (hardware-independent).}
+  \label{fig:4panel}
+\end{figure*}
+
+\begin{figure*}[b!]
+  \centering
+  \includegraphics[width=\textwidth]{nprobe_tuning.png}
+  \caption{Hyperparameter sensitivity analysis for the \texttt{nprobe} parameter on GPU-accelerated \texttt{IVFFlat} and \texttt{IVFPQ} indexes at the 1M-vector scale. Points are colored by $\log_2(\texttt{nprobe})$. \texttt{IVFFlat} exhibits a classic diminishing-returns curve, while \texttt{IVFPQ} saturates near 0.56 recall due to quantization loss.}
+  \label{fig:nprobe}
+\end{figure*}
+
+\subsection{Exact Search (\texttt{IndexFlatL2})}
+This index computes the exact $L_2$ (Euclidean) distance between the query vector $\mathbf{q}$ and every database vector $\mathbf{x}_i$, guaranteeing perfect recall (1.0). Its $O(N)$ time complexity serves as the baseline against which all approximate methods are compared.
+
+\subsection{Inverted File Index (\texttt{IndexIVFFlat})}
+\texttt{IVFFlat} partitions the vector space into $\texttt{nlist}$ Voronoi cells using $k$-means clustering. At query time, only the \texttt{nprobe} nearest cells are searched, reducing the effective number of distance computations. In our experiments, $\texttt{nlist}=\lfloor\sqrt{N}\rfloor$, yielding 316, 707, and 1,000 cells for the three dataset scales.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{pca_sift1m_voronoi.png}
+  \caption{2D PCA projection of the SIFT1M dataset with 1,000 Voronoi cell boundaries overlaid, illustrating the spatial partitioning employed by \texttt{IndexIVFFlat}.}
+  \label{fig:voronoi}
+\end{figure}
+
+\subsection{Product Quantization (\texttt{IndexIVFPQ})}
+\texttt{IVFPQ} combines inverted file indexing with product quantization (PQ)~\cite{jegou2011pq}, which compresses each 128-dimensional vector into $m\!=\!16$ sub-vectors, each quantized to 8 bits. This reduces per-vector storage from 512~bytes to 16~bytes---a $32\times$ compression ratio---at the cost of reduced distance-computation accuracy.
+
+\subsection{Hierarchical Navigable Small World (\texttt{IndexHNSWFlat})}
+HNSW~\cite{malkov2018} constructs a multi-layer proximity graph over the dataset. In our implementation, the graph was initialized with $M=32$ bi-directional links per node and configured with a search candidate pool size of $efSearch=64$. Search proceeds via greedy traversal from coarse to fine layers, achieving $O(\log N)$ query complexity. This index is CPU-only in the current FAISS implementation, as the graph-traversal pattern is inherently sequential and does not benefit from GPU parallelism.
+
+\section{Experimental Setup}
+All experiments were conducted in Google Colab using an NVIDIA T4 GPU (16~GB VRAM) and an Intel Xeon CPU. The SIFT1M dataset~\cite{annbench2022} consists of 1,000,000 base vectors, 10,000 query vectors, and pre-computed ground-truth neighbors, all in 128 dimensions.
+
+Three dataset subsets were created by selecting the first $N$ vectors for $N\in\{100\textrm{K},\,500\textrm{K},\,1\textrm{M}\}$. For each subset, ground-truth nearest neighbors were recomputed using exhaustive \texttt{FlatL2} search against that specific subset, ensuring that recall measurements are not inflated by comparing against a larger reference set. All queries retrieve the top $K\!=\!10$ neighbors.
+
+\textbf{Reproducibility.} All experiments used Python~3.10, FAISS~1.14.1, NumPy~1.26, and Matplotlib~3.8. Random seeds were fixed to guarantee deterministic results. The full notebook used for data collection is provided as supplementary material.
+
+\section{Results and Analysis}
+
+Table~\ref{tab:results} summarizes the key performance metrics at the 1M-vector scale for both CPU and GPU execution.
+
+\begin{table}[htbp]
+\caption{Benchmark Results at the 1M-Vector Scale (128D)}
+\label{tab:results}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Index} & \textbf{Build (s)} & \textbf{Latency (ms/q)} & \textbf{Recall} & \textbf{Mem.} \\
+               & \textbf{CPU / GPU} & \textbf{CPU / GPU} & \textbf{@10} & \textbf{(MB)} \\
+\midrule
+FlatL2  & 0.34 / 0.11 & 7.78 / 0.097 & 1.000 & 488 \\
+IVFFlat & 13.3 / 0.86 & 1.23 / 0.037 & 0.928 & 496 \\
+IVFPQ   & 81.4 / 3.81 & 0.37 / 0.006 & 0.551 & 24 \\
+HNSW    & 363 / ---   & 0.52 / ---   & 0.977 & 748 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Impact of GPU Acceleration on Query Latency}
+As shown in Fig.~\ref{fig:4panel}(a) and (c), GPU acceleration provides substantial latency reductions for all GPU-compatible indexes. \texttt{FlatL2} benefits the most, with query latency decreasing from 7.78~ms (CPU) to 0.097~ms (GPU)---an approximately $80\times$ speedup. This is expected, as exhaustive distance computation is highly parallelizable across GPU cores. Notably, GPU execution preserves identical recall values, confirming that hardware acceleration does not compromise retrieval accuracy.
+
+\texttt{IVFFlat} achieves a $33\times$ speedup (1.23~ms $\to$ 0.037~ms), while \texttt{IVFPQ} reaches 0.006~ms per query on GPU---the lowest absolute latency among all configurations.
+
+\subsection{Hyperparameter Sensitivity (\texttt{nprobe})}
+Fig.~\ref{fig:nprobe} shows the effect of varying \texttt{nprobe} from 1 to 128 on the GPU-accelerated \texttt{IVFFlat} and \texttt{IVFPQ} indexes at the 1M scale.
+
+For \texttt{IVFFlat}, increasing \texttt{nprobe} from 1 to 16 yields significant recall improvements (0.37 $\to$ 0.93) with moderate latency increase. Beyond $\texttt{nprobe}=32$ (recall $= 0.977$), the recall curve exhibits diminishing returns while latency continues to scale linearly. This suggests $\texttt{nprobe}=16$ as a practical operating point for most applications.
+
+\texttt{IVFPQ} exhibits qualitatively different behavior: recall saturates near 0.56 regardless of \texttt{nprobe}. This ceiling is intrinsic to product quantization, where the lossy 8-bit encoding of sub-vectors permanently limits distance-computation accuracy. Increasing \texttt{nprobe} scans more Voronoi cells but cannot recover the precision lost during quantization.
+
+\subsection{Scalability Analysis}
+Table~\ref{tab:scalability} presents CPU query latency across the three dataset sizes, revealing distinct scaling behaviors.
+
+\begin{table}[htbp]
+\caption{CPU Query Latency Across Dataset Scales (ms/query)}
+\label{tab:scalability}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Index} & \textbf{100K} & \textbf{500K} & \textbf{1M} \\
+\midrule
+FlatL2  & 0.69 & 3.46 & 7.78 \\
+IVFFlat & 0.18 & 0.55 & 1.23 \\
+HNSW    & 0.14 & 0.47 & 0.52 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\texttt{FlatL2} exhibits linear $O(N)$ scaling: latency increases proportionally with dataset size (approximately $11\times$ from 100K to 1M). \texttt{IVFFlat} shows sub-linear growth due to Voronoi partitioning, which limits the number of vectors scanned per query. \texttt{HNSW} demonstrates near-logarithmic scaling---latency increases from 0.14~ms to 0.52~ms over a $10\times$ dataset expansion---consistent with its $O(\log N)$ theoretical complexity.
+
+The GPU speedup factor for \texttt{FlatL2} also increases with dataset size ($40\times$ at 100K, $70\times$ at 500K, $80\times$ at 1M), as larger datasets allow fuller utilization of the GPU's parallel compute units.
+
+\section{Discussion}
+The experimental results provide clear guidance for selecting FAISS indexes based on deployment constraints:
+
+\begin{enumerate}
+    \item \textbf{GPU-accelerated deployments:} When GPU hardware is available, \texttt{IndexIVFFlat} with $\texttt{nprobe}=16$ offers the best trade-off between retrieval accuracy (0.928 recall) and query latency (0.037~ms). For applications requiring perfect recall, GPU-accelerated \texttt{FlatL2} achieves sub-millisecond latency even at 1M vectors.
+    \item \textbf{Memory-constrained environments:} \texttt{IndexIVFPQ} reduces memory consumption by approximately 95\% (24~MB vs.\ 488~MB for \texttt{FlatL2} at 1M vectors). This makes it suitable for edge deployments or as a first-stage candidate retrieval method in multi-stage pipelines, where its lower recall (${\approx}\,0.55$) can be compensated by re-ranking.
+    \item \textbf{CPU-only deployments:} \texttt{IndexHNSWFlat} is the strongest CPU-only option, achieving 0.977 recall at 0.52~ms per query. Its logarithmic scaling behavior makes it particularly well-suited for very large datasets, though its build time (363~s at 1M) and memory overhead (748~MB) should be considered.
+\end{enumerate}
+
+\subsection{Limitations and Future Work}
+\begin{itemize}
+    \item The current implementation of HNSW in FAISS is CPU-only; future GPU-enabled graph traversal could further reduce latency.
+    \item IVFPQ's recall ceiling is inherent to product quantization; exploring optimized PQ variants (e.g., OPQ) may improve accuracy while retaining compression benefits.
+    \item Scaling to datasets larger than 1M vectors (e.g., Deep1B) and multi-GPU configurations would provide insight into the limits of each index under extreme workloads.
+    \item Additional hyperparameter sweeps (varying \texttt{nlist}, \texttt{M} for HNSW) could refine the accuracy-latency trade-offs for specific application domains.
+\end{itemize}
+
+\section{Conclusion}
+This study provides a controlled comparison of four FAISS indexing strategies under consistent experimental conditions, with explicit CPU vs.\ GPU performance characterization. The results demonstrate that the choice of index and hardware must be guided by the specific constraints of the deployment environment---including latency requirements, accuracy tolerance, memory budget, and hardware availability---rather than a single universal solution.
+
+\begin{thebibliography}{9}
+\bibitem{faiss2024}
+J.~Johnson, M.~Douze, and H.~J\'{e}gou, ``Billion-scale similarity search with GPUs,'' \textit{IEEE Transactions on Big Data}, vol.~7, no.~3, pp.~535--547, 2021.
+\bibitem{malkov2018}
+Y.~A.~Malkov and D.~A.~Yashunin, ``Efficient and robust approximate nearest neighbor search using hierarchical navigable small world graphs,'' \textit{IEEE Trans.\ Pattern Anal.\ Mach.\ Intell.}, vol.~42, no.~4, pp.~824--836, 2020.
+\bibitem{jegou2011pq}
+H.~J\'{e}gou, M.~Douze, and C.~Schmid, ``Product quantization for nearest neighbor search,'' \textit{IEEE Trans.\ Pattern Anal.\ Mach.\ Intell.}, vol.~33, no.~1, pp.~117--128, 2011.
+\bibitem{lewis2020rag}
+P.~Lewis et al., ``Retrieval-augmented generation for knowledge-intensive NLP tasks,'' in \textit{Proc.\ NeurIPS}, 2020.
+\bibitem{babenko2014}
+A.~Babenko, A.~Slesarev, A.~Chigorin, and V.~Lempitsky, ``Neural codes for image retrieval,'' in \textit{Proc.\ ECCV}, 2014.
+\bibitem{annbench2022}
+``ANN-Benchmarks,'' \url{https://ann-benchmarks.com}, accessed Mar.\ 2026.
+\end{thebibliography}
+
+\end{document}
